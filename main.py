@@ -8,8 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 import analytics
-import narrative
-import store
+
 
 app = FastAPI(title="Wellness Analytics API", version="0.1.0")
 
