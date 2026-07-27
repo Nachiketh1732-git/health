@@ -3,7 +3,7 @@ import ReferenceBand from './components/ReferenceBand.jsx';
 import Trend from './components/Trend.jsx';
 import DataControls from './components/DataControls.jsx';
 import CheckIn from './components/CheckIn.jsx';
-import { watchUser, login, logout, LOCAL_MODE } from './lib/firebase.js';
+import AuthScreen from './components/AuthScreen.jsx';
 import * as api from './lib/api.js';
 
 const STATUS_WORD = {
@@ -11,71 +11,93 @@ const STATUS_WORD = {
 };
 
 export default function App() {
-  const [user, setUser] = useState(undefined);
+  const [phase, setPhase] = useState('waking');   // waking | anon | ready
+  const [profile, setProfile] = useState(null);
   const [insights, setInsights] = useState(null);
   const [readings, setReadings] = useState([]);
-  const [consent, setConsent] = useState(null);
   const [error, setError] = useState('');
 
-  useEffect(() => watchUser(setUser), []);
-
-  const refresh = useCallback(async (u) => {
-    if (!u) return;
+  const loadDashboard = useCallback(async () => {
     setError('');
-    try {
-      const c = await api.getConsent(u);
-      setConsent(c);
-      if (c?.scopes?.store_metrics) {
-        const [i, r] = await Promise.all([api.getInsights(u), api.getReadings(u)]);
-        setInsights(i);
-        setReadings(r.readings);
-      } else {
-        setInsights(null);
-        setReadings([]);
-      }
-    } catch (e) {
-      setError(e.message);
+    const p = await api.me();
+    setProfile(p);
+    if (p.consent?.scopes?.store_metrics) {
+      const [i, r] = await Promise.all([api.getInsights(), api.getReadings()]);
+      setInsights(i);
+      setReadings(r.readings);
+    } else {
+      setInsights(null);
+      setReadings([]);
     }
+    setPhase('ready');
   }, []);
 
-  useEffect(() => { if (user) refresh(user); }, [user, refresh]);
+  // On load: wake the sleeping instance first, then restore any session.
+  useEffect(() => {
+    (async () => {
+      const awake = await api.wake();
+      if (!awake) {
+        setError('The API is taking longer than usual to start. Reload in a moment.');
+        setPhase('anon');
+        return;
+      }
+      if (!api.getToken()) { setPhase('anon'); return; }
+      try {
+        await loadDashboard();
+      } catch {
+        api.clearToken();
+        setPhase('anon');
+      }
+    })();
+  }, [loadDashboard]);
 
-  const saveConsent = async (scopes) => {
-    await api.saveConsent(user, scopes);
-    await refresh(user);
+  const guard = (fn) => async (...args) => {
+    try {
+      await fn(...args);
+    } catch (e) {
+      setError(e.message);
+      if (e.message.includes('Sign in')) { setPhase('anon'); setProfile(null); }
+    }
   };
+
+  const saveConsent = guard(async (scopes) => {
+    await api.setConsent(scopes);
+    await loadDashboard();
+  });
 
   const submitReadings = async (rows) => {
-    await api.postReadings(user, rows);
-    await refresh(user);
+    await api.postReadings(rows);
+    await loadDashboard();
   };
 
-  const wipe = async () => {
-    await api.deleteAccount(user);
-    setInsights(null); setReadings([]); setConsent(null);
-    await refresh(user);
+  const wipe = guard(async () => {
+    await api.deleteMe();
+    api.clearToken();
+    setProfile(null); setInsights(null); setReadings([]);
+    setPhase('anon');
+  });
+
+  const signOut = () => {
+    api.clearToken();
+    setProfile(null); setInsights(null); setReadings([]);
+    setPhase('anon');
   };
 
-  if (user === undefined) return <div className="shell"><p className="empty">Loading…</p></div>;
-
-  if (!user) {
+  if (phase === 'waking') {
     return (
       <div className="shell">
-        <div className="masthead">
-          <div>
-            <div className="eyebrow">Personal baseline analytics</div>
-            <h1>Your numbers, against your own normal</h1>
+        <div className="auth-wrap">
+          <div className="waking">
+            Waking the server. Free instances sleep after 15 minutes, so this
+            first load takes up to a minute.
           </div>
-        </div>
-        <div className="card">
-          <p style={{ marginTop: 0, maxWidth: '58ch' }}>
-            This dashboard compares each day's readings to the range you personally
-            tend to sit in — not to a population average. Sign in to start.
-          </p>
-          <button onClick={login}>Sign in with Google</button>
         </div>
       </div>
     );
+  }
+
+  if (phase === 'anon') {
+    return <AuthScreen onAuthed={loadDashboard} />;
   }
 
   const r = insights?.readiness;
@@ -89,12 +111,11 @@ export default function App() {
       <div className="masthead">
         <div>
           <div className="eyebrow">
-            {(user.displayName ?? 'You')}{today && ` · ${today}`}
-            {LOCAL_MODE && ' · LOCAL MODE'}
+            {profile?.display_name || 'You'}{today && ` · ${today}`}
           </div>
           <h1>Your numbers, against your own normal</h1>
         </div>
-        {!LOCAL_MODE && <button className="ghost" onClick={logout}>Sign out</button>}
+        <button className="ghost" onClick={signOut}>Sign out</button>
       </div>
 
       {error && (
@@ -103,13 +124,13 @@ export default function App() {
         </div>
       )}
 
-      {!consent?.scopes?.store_metrics && (
+      {!profile?.consent?.scopes?.store_metrics && (
         <div className="card" style={{ marginBottom: 20 }}>
           <h2>Before anything is stored</h2>
           <p style={{ maxWidth: '58ch' }}>
-            Nothing is saved until you say so. Choose what this app may do with your
-            readings below — you can change or revoke any of it later, and deleting
-            removes everything for good.
+            Nothing is saved until you say so. Choose what this app may do with
+            your readings below. You can change or revoke any of it later, and
+            deleting removes everything for good.
           </p>
         </div>
       )}
@@ -140,7 +161,9 @@ export default function App() {
                 <div className="source-note">
                   {insights.summary.source === 'gemini'
                     ? 'Phrased by Gemini from computed signals'
-                    : 'Generated from computed signals'}
+                    : insights.summary.source === 'disabled'
+                      ? 'Written insights are off'
+                      : 'Generated from computed signals'}
                 </div>
               </div>
 
@@ -160,7 +183,8 @@ export default function App() {
 
               <div className="card">
                 <h2>Resting heart rate, 30 days</h2>
-                <Trend readings={readings} metric="resting_hr" label="Resting heart rate" unit=" bpm" />
+                <Trend readings={readings} metric="resting_hr"
+                       label="Resting heart rate" unit=" bpm" />
               </div>
             </div>
           </div>
@@ -176,14 +200,14 @@ export default function App() {
 
       <div className="grid">
         <CheckIn onSubmit={submitReadings} />
-        <DataControls consent={consent} onSave={saveConsent} onDelete={wipe} />
+        <DataControls consent={profile?.consent} onSave={saveConsent} onDelete={wipe} />
       </div>
 
       <p className="disclaimer">
-        This is a wellness tracker, not a medical device. It describes how your own
-        readings compare to your own history and does not diagnose, treat, or rule out
-        any condition. If something here concerns you, or if you feel unwell, speak to
-        a qualified clinician.
+        This is a wellness tracker, not a medical device. It describes how your
+        own readings compare to your own history and does not diagnose, treat,
+        or rule out any condition. If something here concerns you, or if you
+        feel unwell, speak to a qualified clinician.
       </p>
     </div>
   );

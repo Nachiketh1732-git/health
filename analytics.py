@@ -107,9 +107,24 @@ def build_band(readings: list[dict], metric: str, on: date) -> Band:
     )
 
 
+DEADBAND_SD = 0.75      # ordinary noise below this costs nothing
+PENALTY_PER_SD = 16.0
+MAX_ADVERSE_SD = 3.5
+
+
 def readiness(bands: Iterable[Band]) -> dict:
     """A single 0-100 composite. Deliberately simple and explainable —
-    a user should be able to reconstruct it from the bands on screen."""
+    a user should be able to reconstruct it from the bands on screen.
+
+    Two guards, both learned the hard way from the sample data:
+
+    The deadband. On any given day roughly half of seven metrics land on
+    their adverse side by chance. Summing those raw deviations penalised a
+    completely ordinary day into the thirties. Nothing under 0.75 SD counts.
+
+    The cap. Metrics that move together — resting HR and HRV almost always
+    do — otherwise compound and drive the score to zero on a merely bad day.
+    """
     scored = [b for b in bands if b.deviation is not None]
     if not scored:
         return {"score": None, "status": "learning",
@@ -118,10 +133,11 @@ def readiness(bands: Iterable[Band]) -> dict:
     penalty = 0.0
     for b in scored:
         adverse = b.deviation if METRIC_SPEC[b.metric]["direction"] == "up" else -b.deviation
-        penalty += max(0.0, adverse) * 9
+        excess = min(adverse, MAX_ADVERSE_SD) - DEADBAND_SD
+        penalty += max(0.0, excess) * PENALTY_PER_SD
 
-    score = int(max(0, min(100, round(85 - penalty))))
-    status: Status = "steady" if score >= 70 else "watch" if score >= 50 else "flag"
+    score = int(max(0, min(100, round(100 - penalty))))
+    status: Status = "steady" if score >= 70 else "watch" if score >= 45 else "flag"
     driver = max(scored, key=lambda b: (b.deviation if METRIC_SPEC[b.metric]["direction"] == "up"
                                         else -b.deviation))
     note = ("Everything sits inside your usual range." if status == "steady"

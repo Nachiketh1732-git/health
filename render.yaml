@@ -1,0 +1,100 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Push this repo to GitHub, then on Render: New > Blueprint > pick the repo.
+# Render reads this file and creates both services.
+#
+# NOTE ON THE DATABASE. Render's free Postgres is deleted 30 days after
+# creation, with no warning and no migration path. For a project you want
+# living on your CV for months, that is a trap. So DATABASE_URL is left as a
+# prompt: paste a connection string from Neon (neon.tech), which has a
+# permanent free tier. Takes two minutes and the app is identical either way.
+# If you would rather use Render's own Postgres, uncomment the `databases:`
+# block at the bottom and swap DATABASE_URL to the fromDatabase form shown.
+
+services:
+  # ---------------------------------------------------------------
+  # API — FastAPI on a free instance. Sleeps after 15 minutes idle;
+  # the frontend pings /healthz on load to cover the cold start.
+  # ---------------------------------------------------------------
+  - type: web
+    name: wellness-api
+    runtime: python
+    plan: free
+    region: singapore          # closest Render region to India
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+
+      # Paste your Neon connection string here when prompted.
+      # Format: postgresql://user:pass@host/dbname?sslmode=require
+      - key: DATABASE_URL
+        sync: false
+
+      # Render generates a strong random value and keeps it stable across
+      # deploys. Rotating it signs everybody out, which is the point.
+      - key: JWT_SECRET
+        generateValue: true
+
+      # Optional. Get one free at aistudio.google.com — no GCP project
+      # needed. Leave blank and insights fall back to generated text.
+      - key: GEMINI_API_KEY
+        sync: false
+
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash
+
+      # Optional hard allowlist. Leave blank and the regex default in
+      # config.py permits any *.onrender.com origin plus localhost.
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+  # ---------------------------------------------------------------
+  # Frontend — a static site, deliberately. Static sites are free,
+  # CDN-served, and never sleep, so only the API has a cold start.
+  # ---------------------------------------------------------------
+  - type: web
+    name: wellness-web
+    runtime: static
+    rootDir: frontend
+    # Vite inlines VITE_* at build time, so the API URL has to be present
+    # during `npm run build` rather than at runtime.
+    buildCommand: npm ci && VITE_API_BASE="https://$API_HOST" npm run build
+    staticPublishPath: ./dist
+    envVars:
+      - key: API_HOST
+        fromService:
+          name: wellness-api
+          type: web
+          property: host
+    headers:
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+    routes:
+      # Single-page app: every unknown path serves index.html.
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+# ---------------------------------------------------------------
+# Render Postgres, if you prefer it over Neon. Remember: free tier is
+# DELETED at day 30. Uncomment this block, then replace the
+# `DATABASE_URL / sync: false` entry above with:
+#
+#   - key: DATABASE_URL
+#     fromDatabase:
+#       name: wellness-db
+#       property: connectionString
+# ---------------------------------------------------------------
+# databases:
+#   - name: wellness-db
+#     databaseName: wellness
+#     plan: free
+#     region: singapore
